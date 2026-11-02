@@ -15,8 +15,7 @@
     --idle: rgb(100, 100, 100);
     --active: rgb(0, 125, 255);
     --ok: #3c3;
-    --key: clamp(52px, min(18vh, 12vw), 96px);
-    --gap: 6px;
+    --stick: clamp(150px, min(52vh, 32vw), 260px);
   }
 
   * {
@@ -196,37 +195,64 @@
     touch-action: none;
   }
 
-  .cluster {
-    display: grid;
-    grid-template-columns: repeat(3, var(--key));
-    grid-template-rows: repeat(3, var(--key));
-    grid-template-areas:
-      ".    up    ."
-      "left .     right"
-      ".    down  .";
-    gap: var(--gap);
+  .joystick {
+    position: relative;
+    flex: none;
+    width: var(--stick);
+    height: var(--stick);
+    border: 2px solid var(--idle);
+    border-radius: 50%;
+    background: #262626;
+    touch-action: none;
   }
+
+  .joystick.active {
+    border-color: var(--active);
+  }
+
+  .knob {
+    position: absolute;
+    left: 30%;
+    top: 30%;
+    width: 40%;
+    height: 40%;
+    border-radius: 50%;
+    background: var(--idle);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+    transition: transform 0.12s ease-out;
+  }
+
+  .joystick.active .knob {
+    background: var(--active);
+    transition: none;
+  }
+
+  .dir {
+    position: absolute;
+    width: 20%;
+    height: 20%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: calc(var(--stick) * 0.09);
+    font-weight: 700;
+    color: var(--sub);
+  }
+
+  .dir.active {
+    color: var(--active);
+  }
+
+  .dir.up    { left: 40%; top: 0; }
+  .dir.down  { left: 40%; bottom: 0; }
+  .dir.left  { left: 0;   top: 40%; }
+  .dir.right { right: 0;  top: 40%; }
 
   .side {
     display: flex;
     flex-direction: column;
     align-items: flex-end;
     gap: 8px;
-  }
-
-  .key {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: 14px;
-    background: var(--idle);
-    font-size: calc(var(--key) * 0.34);
-    font-weight: 700;
-    touch-action: none;
-  }
-
-  .key.active {
-    background: var(--active);
   }
 
   .packet {
@@ -244,7 +270,7 @@
 
   @media (orientation: portrait) {
     :root {
-      --key: clamp(56px, min(25vw, 10vh), 100px);
+      --stick: clamp(180px, min(72vw, 38vh), 300px);
     }
 
     header {
@@ -299,11 +325,12 @@
   </section>
 
   <main id="pad">
-    <div class="cluster">
-      <div class="key" data-key="1" style="grid-area: up">U</div>
-      <div class="key" data-key="4" style="grid-area: left">L</div>
-      <div class="key" data-key="8" style="grid-area: right">R</div>
-      <div class="key" data-key="2" style="grid-area: down">D</div>
+    <div id="joystick" class="joystick">
+      <div class="dir up" data-key="1">U</div>
+      <div class="dir left" data-key="4">L</div>
+      <div class="dir right" data-key="8">R</div>
+      <div class="dir down" data-key="2">D</div>
+      <div id="knob" class="knob"></div>
     </div>
 
     <div class="side">
@@ -319,6 +346,8 @@ const BLE_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 const BLE_WRITE_UUID   = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
 
 const ROBOTIS_COMPANY_ID = 0x07cf;
+const ROBOTIS_MFG_SUFFIX = 0x05;
+const ROBOTIS_MFG_LENGTH = 7;
 const DEVICE_NAME_PREFIX = "GAEMI";
 
 const CONNECT_TIMEOUT_MS = 20000;
@@ -327,6 +356,10 @@ const LOOP_INTERVAL = 10;
 
 const BLE_SEND_INTERVAL = 30;
 
+const RC100_KEY_U = 1;
+const RC100_KEY_D = 2;
+const RC100_KEY_L = 4;
+const RC100_KEY_R = 8;
 const RC100_KEY_1 = 16;
 const RC100_KEY_2 = 32;
 const RC100_KEY_3 = 64;
@@ -343,10 +376,22 @@ const LEVEL_DATA = [
 ];
 const LEVEL_MAX = LEVEL_DATA.length - 1;
 
-const HIT_SLOP = 6;
+const STICK_SECTORS = [
+  RC100_KEY_R,
+  RC100_KEY_U | RC100_KEY_R,
+  RC100_KEY_U,
+  RC100_KEY_U | RC100_KEY_L,
+  RC100_KEY_L,
+  RC100_KEY_D | RC100_KEY_L,
+  RC100_KEY_D,
+  RC100_KEY_D | RC100_KEY_R,
+];
+const STICK_DEADZONE = 0.3;
+const STICK_TRAVEL = 0.6;
+const STICK_GRAB = 1.15;
 
 const $ = (id) => document.getElementById(id);
-const keyEls = Array.from(document.querySelectorAll(".key"));
+const dirEls = Array.from(document.querySelectorAll(".dir"));
 
 let holdBits = 0;
 let level = 0;
@@ -363,7 +408,7 @@ function makePacket(bits) {
 
 function render() {
   const bits = btnData();
-  for (const el of keyEls) {
+  for (const el of dirEls) {
     el.classList.toggle("active", (bits & Number(el.dataset.key)) !== 0);
   }
   $("packet").textContent = Array.from(makePacket(bits),
@@ -415,48 +460,68 @@ const levelEl = document.querySelector(".level");
 levelEl.addEventListener("touchstart", (e) => e.preventDefault(), { passive: false });
 levelEl.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
 
-const pointers = new Map();
+const joystick = $("joystick");
+const knob = $("knob");
+let stickPointer = null;
 
-function hitTest(x, y) {
-  for (const el of keyEls) {
-    const r = el.getBoundingClientRect();
-    if (x >= r.left - HIT_SLOP && x <= r.right + HIT_SLOP
-        && y >= r.top - HIT_SLOP && y <= r.bottom + HIT_SLOP) {
-      return el;
-    }
-  }
-  return null;
-}
-
-function updateHold() {
-  let bits = 0;
-  for (const el of pointers.values()) {
-    if (el !== null) bits |= Number(el.dataset.key);
-  }
+function setHold(bits) {
   if (bits !== holdBits) {
     holdBits = bits;
     render();
   }
 }
 
+function stickOffset(x, y) {
+  const r = joystick.getBoundingClientRect();
+  const radius = r.width / 2;
+  return { dx: x - (r.left + radius), dy: y - (r.top + radius), radius };
+}
+
+function moveStick(x, y) {
+  let { dx, dy, radius } = stickOffset(x, y);
+  const dist = Math.hypot(dx, dy);
+  const travel = radius * STICK_TRAVEL;
+  if (dist > travel) {
+    dx *= travel / dist;
+    dy *= travel / dist;
+  }
+  knob.style.transform = "translate(" + dx + "px, " + dy + "px)";
+
+  if (dist < radius * STICK_DEADZONE) {
+    setHold(0);
+    return;
+  }
+  const sector = Math.round(Math.atan2(-dy, dx) / (Math.PI / 4));
+  setHold(STICK_SECTORS[(sector + 8) % 8]);
+}
+
+function releaseStick() {
+  stickPointer = null;
+  joystick.classList.remove("active");
+  knob.style.transform = "";
+  setHold(0);
+}
+
 const pad = $("pad");
 
 pad.addEventListener("pointerdown", (e) => {
   e.preventDefault();
-  pointers.set(e.pointerId, hitTest(e.clientX, e.clientY));
-  updateHold();
+  if (stickPointer !== null) return;
+  const { dx, dy, radius } = stickOffset(e.clientX, e.clientY);
+  if (Math.hypot(dx, dy) > radius * STICK_GRAB) return;
+  stickPointer = e.pointerId;
+  pad.setPointerCapture(e.pointerId);
+  joystick.classList.add("active");
+  moveStick(e.clientX, e.clientY);
 });
 
 pad.addEventListener("pointermove", (e) => {
-  if (!pointers.has(e.pointerId)) return;
-  pointers.set(e.pointerId, hitTest(e.clientX, e.clientY));
-  updateHold();
+  if (e.pointerId === stickPointer) moveStick(e.clientX, e.clientY);
 });
 
 for (const type of ["pointerup", "pointercancel"]) {
   pad.addEventListener(type, (e) => {
-    pointers.delete(e.pointerId);
-    updateHold();
+    if (e.pointerId === stickPointer) releaseStick();
   });
 }
 
@@ -466,8 +531,7 @@ document.addEventListener("contextmenu", (e) => e.preventDefault());
 
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
-    pointers.clear();
-    updateHold();
+    releaseStick();
   } else {
     requestWakeLock();
   }
@@ -480,6 +544,9 @@ let isBusy = false;
 let isTxBusy = false;
 let isClosing = false;
 let statusText = "";
+let advMac = "";
+let advRssi = null;
+let watchedDevice = null;
 
 function errorMessage(e) {
   return e && e.message ? e.message : String(e);
@@ -491,7 +558,9 @@ function setStatus(text) {
 }
 
 function updateUi() {
-  const name = device ? (device.name || DEVICE_NAME_PREFIX) : "장치 없음";
+  let name = device ? (device.name || DEVICE_NAME_PREFIX) : "장치 없음";
+  if (device && advMac) name += " · " + advMac;
+  if (device && advRssi !== null) name += " · " + advRssi + " dBm";
   $("status").textContent = name + (statusText ? "  |  " + statusText : "");
   $("dot").classList.toggle("on", isConnected);
   $("btn-scan").disabled = isBusy || isConnected;
@@ -512,6 +581,7 @@ async function requestRobot() {
     return navigator.bluetooth.requestDevice({
       acceptAllDevices: true,
       optionalServices: [BLE_SERVICE_UUID],
+      optionalManufacturerData: [ROBOTIS_COMPANY_ID],
     });
   }
   try {
@@ -521,13 +591,41 @@ async function requestRobot() {
         { namePrefix: DEVICE_NAME_PREFIX },
       ],
       optionalServices: [BLE_SERVICE_UUID],
+      optionalManufacturerData: [ROBOTIS_COMPANY_ID],
     });
   } catch (e) {
     if (e.name !== "TypeError") throw e;
     return navigator.bluetooth.requestDevice({
       filters: [{ namePrefix: DEVICE_NAME_PREFIX }, { services: [BLE_SERVICE_UUID] }],
       optionalServices: [BLE_SERVICE_UUID],
+      optionalManufacturerData: [ROBOTIS_COMPANY_ID],
     });
+  }
+}
+
+function onAdvertisement(e) {
+  if (e.device !== device) return;
+  if (typeof e.rssi === "number") advRssi = e.rssi;
+
+  const data = e.manufacturerData && e.manufacturerData.get(ROBOTIS_COMPANY_ID);
+  if (data && data.byteLength >= ROBOTIS_MFG_LENGTH
+      && data.getUint8(ROBOTIS_MFG_LENGTH - 1) === ROBOTIS_MFG_SUFFIX) {
+    const bytes = [];
+    for (let i = 0; i < 6; i++) bytes.push(data.getUint8(i).toString(16).padStart(2, "0"));
+    advMac = bytes.join(":").toUpperCase();
+  }
+  updateUi();
+}
+
+async function watchAdvertisements(target) {
+  if (target === watchedDevice || typeof target.watchAdvertisements !== "function") return;
+  try {
+    target.addEventListener("advertisementreceived", onAdvertisement);
+    await target.watchAdvertisements();
+    watchedDevice = target;
+  } catch (e) {
+    target.removeEventListener("advertisementreceived", onAdvertisement);
+    console.log("광고 수신 미지원: " + errorMessage(e));
   }
 }
 
@@ -555,8 +653,11 @@ async function connect(target) {
   isBusy = true;
   if (target !== device) {
     target.addEventListener("gattserverdisconnected", onDisconnected);
+    advMac = "";
+    advRssi = null;
   }
   device = target;
+  watchAdvertisements(target);
   setStatus("연결 중...");
 
   try {
