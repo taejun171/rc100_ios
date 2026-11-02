@@ -15,7 +15,7 @@
     --idle: rgb(100, 100, 100);
     --active: rgb(0, 125, 255);
     --ok: #3c3;
-    --key: clamp(56px, min(21vh, 12vw), 100px);
+    --key: clamp(52px, min(18vh, 12vw), 96px);
     --gap: 6px;
   }
 
@@ -112,12 +112,87 @@
     opacity: 0.4;
   }
 
+  .level {
+    display: flex;
+    align-items: flex-start;
+    gap: 16px;
+    padding: 12px 24px 4px;
+    touch-action: none;
+  }
+
+  .level-title {
+    margin-top: 8px;
+    font-size: 14px;
+    color: var(--sub);
+    white-space: nowrap;
+  }
+
+  .slider {
+    position: relative;
+    flex: 1;
+    height: 56px;
+    touch-action: none;
+  }
+
+  .track {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 14px;
+    height: 8px;
+    border-radius: 4px;
+    background: var(--idle);
+  }
+
+  .fill {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    border-radius: 4px;
+    background: var(--active);
+  }
+
+  .thumb {
+    position: absolute;
+    top: 4px;
+    width: 28px;
+    height: 28px;
+    margin-left: -14px;
+    border-radius: 14px;
+    background: var(--text);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  }
+
+  .tick {
+    position: absolute;
+    top: 38px;
+    width: 32px;
+    margin-left: -16px;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--sub);
+    text-align: center;
+  }
+
+  .tick.active {
+    color: var(--text);
+  }
+
+  .level-value {
+    min-width: 32px;
+    font-size: 28px;
+    font-weight: 700;
+    text-align: center;
+  }
+
   #pad {
     flex: 1;
     display: flex;
-    align-items: center;
+    align-items: flex-end;
     justify-content: space-between;
-    padding: 0 16px;
+    gap: 16px;
+    padding: 8px 16px 16px;
     touch-action: none;
   }
 
@@ -132,16 +207,11 @@
     gap: var(--gap);
   }
 
-  .center {
+  .side {
     display: flex;
     flex-direction: column;
-    align-items: center;
-    gap: 16px;
-  }
-
-  .row {
-    display: flex;
-    gap: 12px;
+    align-items: flex-end;
+    gap: 8px;
   }
 
   .key {
@@ -159,11 +229,6 @@
     background: var(--active);
   }
 
-  .key.shoulder {
-    width: calc(var(--key) * 1.4);
-    height: calc(var(--key) * 0.8);
-  }
-
   .packet {
     font-family: Menlo, Consolas, monospace;
     font-size: 13px;
@@ -174,7 +239,7 @@
     max-width: 260px;
     font-size: 12px;
     color: #888;
-    text-align: center;
+    text-align: right;
   }
 
   @media (orientation: portrait) {
@@ -190,14 +255,23 @@
       flex-basis: 100%;
     }
 
-    #pad {
-      flex-direction: column;
-      justify-content: space-evenly;
-      padding: 12px 16px;
+    .level {
+      padding: 12px 20px 4px;
     }
 
-    .center {
+    #pad {
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-end;
+    }
+
+    .side {
       order: -1;
+      align-items: center;
+    }
+
+    .hint {
+      text-align: center;
     }
   }
 </style>
@@ -214,28 +288,27 @@
     <button id="btn-connect">연결</button>
   </header>
 
+  <section class="level">
+    <div class="level-title">단계</div>
+    <div id="slider" class="slider">
+      <div class="track"><div id="fill" class="fill"></div></div>
+      <div id="ticks"></div>
+      <div id="thumb" class="thumb"></div>
+    </div>
+    <div id="level-value" class="level-value">0</div>
+  </section>
+
   <main id="pad">
     <div class="cluster">
-      <div class="key" data-key="1" data-mode="hold" style="grid-area: up">U</div>
-      <div class="key" data-key="4" data-mode="hold" style="grid-area: left">L</div>
-      <div class="key" data-key="8" data-mode="hold" style="grid-area: right">R</div>
-      <div class="key" data-key="2" data-mode="hold" style="grid-area: down">D</div>
+      <div class="key" data-key="1" style="grid-area: up">U</div>
+      <div class="key" data-key="4" style="grid-area: left">L</div>
+      <div class="key" data-key="8" style="grid-area: right">R</div>
+      <div class="key" data-key="2" style="grid-area: down">D</div>
     </div>
 
-    <div class="center">
-      <div class="row">
-        <div class="key shoulder" data-key="512" data-mode="hold">6</div>
-        <div class="key shoulder" data-key="256" data-mode="toggle">5</div>
-      </div>
+    <div class="side">
       <div id="packet" class="packet"></div>
       <div id="hint" class="hint"></div>
-    </div>
-
-    <div class="cluster">
-      <div class="key" data-key="16" data-mode="toggle" style="grid-area: up">1</div>
-      <div class="key" data-key="32" data-mode="toggle" style="grid-area: left">2</div>
-      <div class="key" data-key="128" data-mode="toggle" style="grid-area: right">4</div>
-      <div class="key" data-key="64" data-mode="toggle" style="grid-area: down">3</div>
     </div>
   </main>
 
@@ -254,8 +327,21 @@ const LOOP_INTERVAL = 10;
 
 const BLE_SEND_INTERVAL = 30;
 
+const RC100_KEY_1 = 16;
+const RC100_KEY_2 = 32;
+const RC100_KEY_3 = 64;
+const RC100_KEY_4 = 128;
 const RC100_KEY_5 = 256;
-const SPEED_KEYS = [0, 16, 32, 64, 128];
+
+const LEVEL_DATA = [
+  0,
+  RC100_KEY_1 | RC100_KEY_5,
+  RC100_KEY_2 | RC100_KEY_5,
+  RC100_KEY_3 | RC100_KEY_5,
+  RC100_KEY_4 | RC100_KEY_5,
+  RC100_KEY_3 | RC100_KEY_4 | RC100_KEY_5,
+];
+const LEVEL_MAX = LEVEL_DATA.length - 1;
 
 const HIT_SLOP = 6;
 
@@ -263,18 +349,10 @@ const $ = (id) => document.getElementById(id);
 const keyEls = Array.from(document.querySelectorAll(".key"));
 
 let holdBits = 0;
-let speed = 0;
-let isLock = false;
-
-function toggleBits() {
-  let bits = 0;
-  if (speed !== 0) bits |= SPEED_KEYS[speed] | RC100_KEY_5;
-  if (isLock) bits |= RC100_KEY_5;
-  return bits;
-}
+let level = 0;
 
 function btnData() {
-  return holdBits | toggleBits();
+  return holdBits | LEVEL_DATA[level];
 }
 
 function makePacket(bits) {
@@ -290,17 +368,52 @@ function render() {
   }
   $("packet").textContent = Array.from(makePacket(bits),
       (b) => b.toString(16).padStart(2, "0").toUpperCase()).join(" ");
+
+  const percent = level / LEVEL_MAX * 100 + "%";
+  $("thumb").style.left = percent;
+  $("fill").style.width = percent;
+  $("level-value").textContent = level;
+  for (const el of tickEls) {
+    el.classList.toggle("active", Number(el.dataset.level) === level);
+  }
 }
 
-function onToggle(key) {
-  if (key === RC100_KEY_5) {
-    isLock = !isLock;
-  } else {
-    const index = SPEED_KEYS.indexOf(key);
-    speed = speed === index ? 0 : index;
-  }
-  render();
+const slider = $("slider");
+const tickEls = [];
+
+for (let i = 0; i <= LEVEL_MAX; i++) {
+  const el = document.createElement("div");
+  el.className = "tick";
+  el.dataset.level = i;
+  el.style.left = i / LEVEL_MAX * 100 + "%";
+  el.textContent = i;
+  $("ticks").appendChild(el);
+  tickEls.push(el);
 }
+
+function setLevelAt(x) {
+  const r = slider.getBoundingClientRect();
+  const ratio = Math.min(Math.max((x - r.left) / r.width, 0), 1);
+  const next = Math.round(ratio * LEVEL_MAX);
+  if (next !== level) {
+    level = next;
+    render();
+  }
+}
+
+slider.addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  slider.setPointerCapture(e.pointerId);
+  setLevelAt(e.clientX);
+});
+
+slider.addEventListener("pointermove", (e) => {
+  if (slider.hasPointerCapture(e.pointerId)) setLevelAt(e.clientX);
+});
+
+const levelEl = document.querySelector(".level");
+levelEl.addEventListener("touchstart", (e) => e.preventDefault(), { passive: false });
+levelEl.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
 
 const pointers = new Map();
 
@@ -313,10 +426,6 @@ function hitTest(x, y) {
     }
   }
   return null;
-}
-
-function holdTarget(el) {
-  return el !== null && el.dataset.mode === "hold" ? el : null;
 }
 
 function updateHold() {
@@ -334,15 +443,13 @@ const pad = $("pad");
 
 pad.addEventListener("pointerdown", (e) => {
   e.preventDefault();
-  const el = hitTest(e.clientX, e.clientY);
-  pointers.set(e.pointerId, holdTarget(el));
-  if (el !== null && el.dataset.mode === "toggle") onToggle(Number(el.dataset.key));
+  pointers.set(e.pointerId, hitTest(e.clientX, e.clientY));
   updateHold();
 });
 
 pad.addEventListener("pointermove", (e) => {
   if (!pointers.has(e.pointerId)) return;
-  pointers.set(e.pointerId, holdTarget(hitTest(e.clientX, e.clientY)));
+  pointers.set(e.pointerId, hitTest(e.clientX, e.clientY));
   updateHold();
 });
 
