@@ -1,0 +1,578 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#1e1e1e">
+<title>RC-100</title>
+<style>
+  :root {
+    --bg: #1e1e1e;
+    --panel: #3a3a3a;
+    --line: #444;
+    --text: #fff;
+    --sub: #aaa;
+    --idle: rgb(100, 100, 100);
+    --active: rgb(0, 125, 255);
+    --ok: #3c3;
+    --key: clamp(56px, min(21vh, 12vw), 100px);
+    --gap: 6px;
+  }
+
+  * {
+    box-sizing: border-box;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+  }
+
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+
+  body {
+    display: flex;
+    flex-direction: column;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .info {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .title {
+    font-size: 16px;
+    font-weight: 700;
+  }
+
+  .status {
+    margin-top: 2px;
+    font-size: 13px;
+    color: var(--sub);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .dot {
+    flex: none;
+    width: 12px;
+    height: 12px;
+    border-radius: 6px;
+    background: #666;
+  }
+
+  .dot.on {
+    background: var(--ok);
+  }
+
+  .show-all {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 13px;
+    color: var(--sub);
+    white-space: nowrap;
+  }
+
+  header button {
+    min-width: 84px;
+    height: 40px;
+    padding: 0 14px;
+    border: 0;
+    border-radius: 8px;
+    background: var(--panel);
+    color: var(--text);
+    font-size: 15px;
+    font-weight: 600;
+    font-family: inherit;
+  }
+
+  header button:active {
+    background: #555;
+  }
+
+  header button:disabled {
+    opacity: 0.4;
+  }
+
+  #pad {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 16px;
+    touch-action: none;
+  }
+
+  .cluster {
+    display: grid;
+    grid-template-columns: repeat(3, var(--key));
+    grid-template-rows: repeat(3, var(--key));
+    grid-template-areas:
+      ".    up    ."
+      "left .     right"
+      ".    down  .";
+    gap: var(--gap);
+  }
+
+  .center {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .row {
+    display: flex;
+    gap: 12px;
+  }
+
+  .key {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 14px;
+    background: var(--idle);
+    font-size: calc(var(--key) * 0.34);
+    font-weight: 700;
+    touch-action: none;
+  }
+
+  .key.active {
+    background: var(--active);
+  }
+
+  .key.shoulder {
+    width: calc(var(--key) * 1.4);
+    height: calc(var(--key) * 0.8);
+  }
+
+  .packet {
+    font-family: Menlo, Consolas, monospace;
+    font-size: 13px;
+    color: #888;
+  }
+
+  .hint {
+    max-width: 260px;
+    font-size: 12px;
+    color: #888;
+    text-align: center;
+  }
+
+  @media (orientation: portrait) {
+    :root {
+      --key: clamp(56px, min(25vw, 10vh), 100px);
+    }
+
+    header {
+      flex-wrap: wrap;
+    }
+
+    .info {
+      flex-basis: 100%;
+    }
+
+    #pad {
+      flex-direction: column;
+      justify-content: space-evenly;
+      padding: 12px 16px;
+    }
+
+    .center {
+      order: -1;
+    }
+  }
+</style>
+</head>
+<body>
+  <header>
+    <div class="info">
+      <div class="title">RC-100 · ESP32 BLE</div>
+      <div id="status" class="status">장치 없음</div>
+    </div>
+    <span id="dot" class="dot"></span>
+    <label class="show-all"><input id="show-all" type="checkbox"> 전체 장치</label>
+    <button id="btn-scan">검색</button>
+    <button id="btn-connect">연결</button>
+  </header>
+
+  <main id="pad">
+    <div class="cluster">
+      <div class="key" data-key="1" data-mode="hold" style="grid-area: up">U</div>
+      <div class="key" data-key="4" data-mode="hold" style="grid-area: left">L</div>
+      <div class="key" data-key="8" data-mode="hold" style="grid-area: right">R</div>
+      <div class="key" data-key="2" data-mode="hold" style="grid-area: down">D</div>
+    </div>
+
+    <div class="center">
+      <div class="row">
+        <div class="key shoulder" data-key="512" data-mode="hold">6</div>
+        <div class="key shoulder" data-key="256" data-mode="toggle">5</div>
+      </div>
+      <div id="packet" class="packet"></div>
+      <div id="hint" class="hint"></div>
+    </div>
+
+    <div class="cluster">
+      <div class="key" data-key="16" data-mode="toggle" style="grid-area: up">1</div>
+      <div class="key" data-key="32" data-mode="toggle" style="grid-area: left">2</div>
+      <div class="key" data-key="128" data-mode="toggle" style="grid-area: right">4</div>
+      <div class="key" data-key="64" data-mode="toggle" style="grid-area: down">3</div>
+    </div>
+  </main>
+
+<script>
+"use strict";
+
+const BLE_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const BLE_WRITE_UUID   = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+
+const ROBOTIS_COMPANY_ID = 0x07cf;
+const DEVICE_NAME_PREFIX = "GAEMI";
+
+const CONNECT_TIMEOUT_MS = 20000;
+
+const LOOP_INTERVAL = 10;
+
+const BLE_SEND_INTERVAL = 30;
+
+const RC100_KEY_5 = 256;
+const SPEED_KEYS = [0, 16, 32, 64, 128];
+
+const HIT_SLOP = 6;
+
+const $ = (id) => document.getElementById(id);
+const keyEls = Array.from(document.querySelectorAll(".key"));
+
+let holdBits = 0;
+let speed = 0;
+let isLock = false;
+
+function toggleBits() {
+  let bits = 0;
+  if (speed !== 0) bits |= SPEED_KEYS[speed] | RC100_KEY_5;
+  if (isLock) bits |= RC100_KEY_5;
+  return bits;
+}
+
+function btnData() {
+  return holdBits | toggleBits();
+}
+
+function makePacket(bits) {
+  const low = bits & 0xff;
+  const high = (bits >> 8) & 0xff;
+  return new Uint8Array([0xff, 0x55, low, 255 - low, high, 255 - high]);
+}
+
+function render() {
+  const bits = btnData();
+  for (const el of keyEls) {
+    el.classList.toggle("active", (bits & Number(el.dataset.key)) !== 0);
+  }
+  $("packet").textContent = Array.from(makePacket(bits),
+      (b) => b.toString(16).padStart(2, "0").toUpperCase()).join(" ");
+}
+
+function onToggle(key) {
+  if (key === RC100_KEY_5) {
+    isLock = !isLock;
+  } else {
+    const index = SPEED_KEYS.indexOf(key);
+    speed = speed === index ? 0 : index;
+  }
+  render();
+}
+
+const pointers = new Map();
+
+function hitTest(x, y) {
+  for (const el of keyEls) {
+    const r = el.getBoundingClientRect();
+    if (x >= r.left - HIT_SLOP && x <= r.right + HIT_SLOP
+        && y >= r.top - HIT_SLOP && y <= r.bottom + HIT_SLOP) {
+      return el;
+    }
+  }
+  return null;
+}
+
+function holdTarget(el) {
+  return el !== null && el.dataset.mode === "hold" ? el : null;
+}
+
+function updateHold() {
+  let bits = 0;
+  for (const el of pointers.values()) {
+    if (el !== null) bits |= Number(el.dataset.key);
+  }
+  if (bits !== holdBits) {
+    holdBits = bits;
+    render();
+  }
+}
+
+const pad = $("pad");
+
+pad.addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  const el = hitTest(e.clientX, e.clientY);
+  pointers.set(e.pointerId, holdTarget(el));
+  if (el !== null && el.dataset.mode === "toggle") onToggle(Number(el.dataset.key));
+  updateHold();
+});
+
+pad.addEventListener("pointermove", (e) => {
+  if (!pointers.has(e.pointerId)) return;
+  pointers.set(e.pointerId, holdTarget(hitTest(e.clientX, e.clientY)));
+  updateHold();
+});
+
+for (const type of ["pointerup", "pointercancel"]) {
+  pad.addEventListener(type, (e) => {
+    pointers.delete(e.pointerId);
+    updateHold();
+  });
+}
+
+pad.addEventListener("touchstart", (e) => e.preventDefault(), { passive: false });
+pad.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+document.addEventListener("contextmenu", (e) => e.preventDefault());
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    pointers.clear();
+    updateHold();
+  } else {
+    requestWakeLock();
+  }
+});
+
+let device = null;
+let writeChar = null;
+let isConnected = false;
+let isBusy = false;
+let isTxBusy = false;
+let isClosing = false;
+let statusText = "";
+
+function errorMessage(e) {
+  return e && e.message ? e.message : String(e);
+}
+
+function setStatus(text) {
+  statusText = text;
+  updateUi();
+}
+
+function updateUi() {
+  const name = device ? (device.name || DEVICE_NAME_PREFIX) : "장치 없음";
+  $("status").textContent = name + (statusText ? "  |  " + statusText : "");
+  $("dot").classList.toggle("on", isConnected);
+  $("btn-scan").disabled = isBusy || isConnected;
+  $("btn-connect").disabled = isBusy;
+  $("btn-connect").textContent = isConnected ? "연결 해제" : "연결";
+}
+
+function withTimeout(promise, ms, message) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+async function requestRobot() {
+  if ($("show-all").checked) {
+    return navigator.bluetooth.requestDevice({
+      acceptAllDevices: true,
+      optionalServices: [BLE_SERVICE_UUID],
+    });
+  }
+  try {
+    return await navigator.bluetooth.requestDevice({
+      filters: [
+        { manufacturerData: [{ companyIdentifier: ROBOTIS_COMPANY_ID }] },
+        { namePrefix: DEVICE_NAME_PREFIX },
+      ],
+      optionalServices: [BLE_SERVICE_UUID],
+    });
+  } catch (e) {
+    if (e.name !== "TypeError") throw e;
+    return navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: DEVICE_NAME_PREFIX }, { services: [BLE_SERVICE_UUID] }],
+      optionalServices: [BLE_SERVICE_UUID],
+    });
+  }
+}
+
+async function scan() {
+  if (isBusy) return;
+  if (!navigator.bluetooth) {
+    setStatus("Web Bluetooth 미지원 (iPhone 은 Bluefy 로 여세요)");
+    return;
+  }
+
+  let picked;
+  try {
+    picked = await requestRobot();
+  } catch (e) {
+    setStatus(e.name === "NotFoundError" ? "" : "검색 실패 (" + errorMessage(e) + ")");
+    return;
+  }
+  await connect(picked);
+}
+
+async function connect(target) {
+  if (isBusy) return;
+  await closeDevice();
+
+  isBusy = true;
+  if (target !== device) {
+    target.addEventListener("gattserverdisconnected", onDisconnected);
+  }
+  device = target;
+  setStatus("연결 중...");
+
+  try {
+    const server = await withTimeout(device.gatt.connect(), CONNECT_TIMEOUT_MS, "시간 초과");
+    let service;
+    try {
+      service = await server.getPrimaryService(BLE_SERVICE_UUID);
+      writeChar = await service.getCharacteristic(BLE_WRITE_UUID);
+    } catch (e) {
+      isClosing = true;
+      device.gatt.disconnect();
+      isClosing = false;
+      throw new Error("GAEMI BLE 장치가 아닙니다");
+    }
+    isTxBusy = false;
+    isConnected = true;
+    statusText = "연결됨";
+    requestWakeLock();
+  } catch (e) {
+    writeChar = null;
+    isConnected = false;
+    statusText = "연결 실패 (" + errorMessage(e) + ")";
+  } finally {
+    isBusy = false;
+    updateUi();
+  }
+}
+
+function onDisconnected() {
+  if (isClosing || !isConnected) return;
+  writeChar = null;
+  isConnected = false;
+  isTxBusy = false;
+  setStatus("연결 끊김");
+}
+
+async function closeDevice() {
+  writeChar = null;
+  isConnected = false;
+  isTxBusy = false;
+  if (device && device.gatt.connected) {
+    isClosing = true;
+    try {
+      device.gatt.disconnect();
+    } finally {
+      isClosing = false;
+    }
+  }
+}
+
+async function onConnectPress() {
+  if (isBusy) return;
+  if (isConnected) {
+    await closeDevice();
+    setStatus("연결 해제됨");
+    return;
+  }
+  if (device !== null) {
+    await connect(device);
+  } else {
+    await scan();
+  }
+}
+
+function send(packet) {
+  if (writeChar === null || isTxBusy) return false;
+
+  isTxBusy = true;
+  const write = writeChar.writeValueWithoutResponse
+    ? writeChar.writeValueWithoutResponse(packet)
+    : writeChar.writeValue(packet);
+  write
+    .catch((e) => console.log("BLE 전송 실패: " + errorMessage(e)))
+    .finally(() => { isTxBusy = false; });
+  return true;
+}
+
+let preBtnData = -1;
+let preSendTime = 0;
+
+setInterval(() => {
+  const bits = btnData();
+  if (isConnected) {
+    const now = Date.now();
+    if (bits !== preBtnData || now - preSendTime >= BLE_SEND_INTERVAL) {
+      if (send(makePacket(bits))) preSendTime = now;
+    }
+  }
+  preBtnData = bits;
+}, LOOP_INTERVAL);
+
+let wakeLock = null;
+
+async function requestWakeLock() {
+  if (!("wakeLock" in navigator) || wakeLock !== null || document.hidden) return;
+  try {
+    wakeLock = await navigator.wakeLock.request("screen");
+    wakeLock.addEventListener("release", () => { wakeLock = null; });
+  } catch (e) {
+    wakeLock = null;
+  }
+}
+
+$("btn-scan").addEventListener("click", scan);
+$("btn-connect").addEventListener("click", onConnectPress);
+
+try {
+  $("show-all").checked = localStorage.getItem("rc100/show_all") === "1";
+} catch (e) {}
+$("show-all").addEventListener("change", () => {
+  try {
+    localStorage.setItem("rc100/show_all", $("show-all").checked ? "1" : "0");
+  } catch (e) {}
+});
+
+if (!navigator.bluetooth) {
+  $("hint").textContent = "이 브라우저는 Web Bluetooth 를 지원하지 않습니다. iPhone 은 Bluefy 앱으로 이 페이지를 여세요.";
+} else if (!window.isSecureContext) {
+  $("hint").textContent = "Web Bluetooth 는 HTTPS 에서만 동작합니다.";
+}
+
+updateUi();
+render();
+</script>
+</body>
+</html>
