@@ -268,6 +268,110 @@
     text-align: right;
   }
 
+  .scan-panel {
+    position: fixed;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.6);
+  }
+
+  .scan-panel.open {
+    display: flex;
+  }
+
+  .scan-box {
+    display: flex;
+    flex-direction: column;
+    width: min(480px, calc(100% - 32px));
+    max-height: calc(100% - 32px);
+    padding: 16px;
+    border-radius: 14px;
+    background: #2a2a2a;
+  }
+
+  .scan-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+
+  .scan-title {
+    flex: 1;
+    font-size: 17px;
+    font-weight: 700;
+  }
+
+  .scan-state {
+    font-size: 13px;
+    color: var(--sub);
+  }
+
+  .scan-list {
+    flex: 1;
+    min-height: 60px;
+    overflow-y: auto;
+  }
+
+  .scan-item {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    gap: 12px;
+    padding: 12px 8px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text);
+    font-family: inherit;
+    text-align: left;
+  }
+
+  .scan-item:active {
+    background: var(--panel);
+  }
+
+  .scan-mac {
+    flex: 1;
+    font-family: Menlo, Consolas, monospace;
+    font-size: 16px;
+    font-weight: 600;
+  }
+
+  .scan-sub {
+    font-size: 12px;
+    color: var(--sub);
+    text-align: right;
+  }
+
+  .scan-empty {
+    padding: 24px 0;
+    color: #999;
+    text-align: center;
+  }
+
+  .scan-buttons {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 12px;
+  }
+
+  .scan-buttons button {
+    min-width: 84px;
+    height: 40px;
+    padding: 0 14px;
+    border: 0;
+    border-radius: 8px;
+    background: var(--panel);
+    color: var(--text);
+    font-size: 15px;
+    font-weight: 600;
+    font-family: inherit;
+  }
+
   @media (orientation: portrait) {
     :root {
       --stick: clamp(180px, min(72vw, 38vh), 300px);
@@ -340,6 +444,20 @@
     </div>
   </main>
 
+  <div id="scan-panel" class="scan-panel">
+    <div class="scan-box">
+      <div class="scan-head">
+        <div class="scan-title">GAEMI 로봇 검색</div>
+        <div id="scan-state" class="scan-state"></div>
+      </div>
+      <div id="scan-list" class="scan-list"></div>
+      <div class="scan-buttons">
+        <button id="btn-picker">선택 창으로 검색</button>
+        <button id="btn-scan-close">닫기</button>
+      </div>
+    </div>
+  </div>
+
 <script>
 "use strict";
 
@@ -352,6 +470,7 @@ const ROBOTIS_MFG_LENGTH = 7;
 const DEVICE_NAME_PREFIX = "GAEMI";
 
 const CONNECT_TIMEOUT_MS = 20000;
+const LE_SCAN_TIMEOUT_MS = 10000;
 
 const LOOP_INTERVAL = 10;
 
@@ -629,6 +748,17 @@ async function requestRobot() {
   }
 }
 
+function parseMac(manufacturerData) {
+  const data = manufacturerData && manufacturerData.get(ROBOTIS_COMPANY_ID);
+  if (!data || data.byteLength < ROBOTIS_MFG_LENGTH
+      || data.getUint8(ROBOTIS_MFG_LENGTH - 1) !== ROBOTIS_MFG_SUFFIX) {
+    return "";
+  }
+  const bytes = [];
+  for (let i = 0; i < 6; i++) bytes.push(data.getUint8(i).toString(16).padStart(2, "0"));
+  return bytes.join(":").toUpperCase();
+}
+
 function onAdvertisement(e) {
   if (e.device !== device) return;
   advCount++;
@@ -643,14 +773,142 @@ function onAdvertisement(e) {
   }
   advRaw = raw.join(", ");
 
-  const data = e.manufacturerData && e.manufacturerData.get(ROBOTIS_COMPANY_ID);
-  if (data && data.byteLength >= ROBOTIS_MFG_LENGTH
-      && data.getUint8(ROBOTIS_MFG_LENGTH - 1) === ROBOTIS_MFG_SUFFIX) {
-    const bytes = [];
-    for (let i = 0; i < 6; i++) bytes.push(data.getUint8(i).toString(16).padStart(2, "0"));
-    advMac = bytes.join(":").toUpperCase();
-  }
+  const mac = parseMac(e.manufacturerData);
+  if (mac) advMac = mac;
   updateUi();
+}
+
+let leScan = null;
+let leScanTimer = null;
+const leFound = new Map();
+
+function isLeScanSupported() {
+  return !!navigator.bluetooth && typeof navigator.bluetooth.requestLEScan === "function";
+}
+
+function openScanPanel() {
+  $("scan-panel").classList.add("open");
+}
+
+function closeScanPanel() {
+  stopLeScan();
+  $("scan-panel").classList.remove("open");
+}
+
+function setScanState(text) {
+  $("scan-state").textContent = text;
+}
+
+function renderScanList() {
+  const list = $("scan-list");
+  list.textContent = "";
+
+  const entries = Array.from(leFound.values()).sort((a, b) => b.rssi - a.rssi);
+  if (entries.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "scan-empty";
+    empty.textContent = leScan ? "검색 중..." : "검색된 장치 없음";
+    list.appendChild(empty);
+    return;
+  }
+
+  for (const entry of entries) {
+    const item = document.createElement("button");
+    item.className = "scan-item";
+
+    const mac = document.createElement("div");
+    mac.className = "scan-mac";
+    mac.textContent = entry.mac || entry.name;
+
+    const sub = document.createElement("div");
+    sub.className = "scan-sub";
+    sub.textContent = (entry.mac ? entry.name + " · " : "") + entry.rssi + " dBm";
+
+    item.append(mac, sub);
+    item.addEventListener("click", () => {
+      closeScanPanel();
+      connect(entry.device, entry);
+    });
+    list.appendChild(item);
+  }
+}
+
+function onScanAdvertisement(e) {
+  if (leScan === null) return;
+  const mac = parseMac(e.manufacturerData);
+  const name = e.name || (e.device && e.device.name) || "";
+  if (!$("show-all").checked && !mac && !name.toUpperCase().startsWith(DEVICE_NAME_PREFIX)) return;
+
+  const prev = leFound.get(e.device.id);
+  leFound.set(e.device.id, {
+    device: e.device,
+    mac: mac || (prev ? prev.mac : ""),
+    name: name || DEVICE_NAME_PREFIX,
+    rssi: typeof e.rssi === "number" ? e.rssi : (prev ? prev.rssi : -127),
+  });
+  renderScanList();
+}
+
+async function startLeScan() {
+  stopLeScan();
+  leFound.clear();
+  openScanPanel();
+  setScanState("검색 중...");
+
+  const options = $("show-all").checked
+    ? { acceptAllAdvertisements: true, keepRepeatedDevices: true }
+    : {
+        filters: [
+          { manufacturerData: [{ companyIdentifier: ROBOTIS_COMPANY_ID }] },
+          { namePrefix: DEVICE_NAME_PREFIX },
+        ],
+        keepRepeatedDevices: true,
+      };
+
+  try {
+    try {
+      leScan = await navigator.bluetooth.requestLEScan(options);
+    } catch (e) {
+      if (e.name !== "TypeError") throw e;
+      leScan = await navigator.bluetooth.requestLEScan(
+          { acceptAllAdvertisements: true, keepRepeatedDevices: true });
+    }
+  } catch (e) {
+    leScan = null;
+    if (e.name === "NotFoundError" || e.name === "AbortError") {
+      closeScanPanel();
+      return;
+    }
+    setScanState("");
+    $("scan-list").innerHTML = "";
+    const empty = document.createElement("div");
+    empty.className = "scan-empty";
+    empty.textContent = "목록 검색 실패 (" + errorMessage(e) + "). '선택 창으로 검색' 을 누르세요.";
+    $("scan-list").appendChild(empty);
+    return;
+  }
+
+  navigator.bluetooth.addEventListener("advertisementreceived", onScanAdvertisement);
+  renderScanList();
+  leScanTimer = setTimeout(() => {
+    stopLeScan();
+    setScanState(leFound.size > 0 ? leFound.size + "개 장치 검색됨" : "");
+    renderScanList();
+  }, LE_SCAN_TIMEOUT_MS);
+}
+
+function stopLeScan() {
+  clearTimeout(leScanTimer);
+  leScanTimer = null;
+  if (navigator.bluetooth) {
+    navigator.bluetooth.removeEventListener("advertisementreceived", onScanAdvertisement);
+  }
+  if (leScan !== null) {
+    try {
+      leScan.stop();
+    } catch (e) {}
+    leScan = null;
+  }
 }
 
 async function watchAdvertisements(target) {
@@ -680,7 +938,14 @@ async function scan() {
     setStatus("Web Bluetooth 미지원 (iPhone 은 Bluefy 로 여세요)");
     return;
   }
+  if (isLeScanSupported()) {
+    await startLeScan();
+  } else {
+    await scanWithPicker();
+  }
+}
 
+async function scanWithPicker() {
   let picked;
   try {
     picked = await requestRobot();
@@ -691,15 +956,15 @@ async function scan() {
   await connect(picked);
 }
 
-async function connect(target) {
+async function connect(target, found) {
   if (isBusy) return;
   await closeDevice();
 
   isBusy = true;
   if (target !== device) {
     target.addEventListener("gattserverdisconnected", onDisconnected);
-    advMac = "";
-    advRssi = null;
+    advMac = found ? found.mac : "";
+    advRssi = found ? found.rssi : null;
     advCount = 0;
     advState = "";
     advRaw = "";
@@ -718,6 +983,9 @@ async function connect(target) {
       isClosing = true;
       device.gatt.disconnect();
       isClosing = false;
+      if (e.name === "SecurityError") {
+        throw new Error("서비스 접근 권한 없음. 검색 목록의 '선택 창으로 검색' 으로 다시 연결하세요");
+      }
       throw new Error("GAEMI BLE 장치가 아닙니다");
     }
     isTxBusy = false;
@@ -811,6 +1079,11 @@ async function requestWakeLock() {
 
 $("btn-scan").addEventListener("click", scan);
 $("btn-connect").addEventListener("click", onConnectPress);
+$("btn-scan-close").addEventListener("click", closeScanPanel);
+$("btn-picker").addEventListener("click", () => {
+  closeScanPanel();
+  scanWithPicker();
+});
 
 try {
   $("show-all").checked = localStorage.getItem("rc100/show_all") === "1";
