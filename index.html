@@ -439,7 +439,6 @@
 
     <div class="side">
       <div id="packet" class="packet"></div>
-      <div id="adv" class="hint"></div>
       <div id="hint" class="hint"></div>
     </div>
   </main>
@@ -666,9 +665,6 @@ let isClosing = false;
 let statusText = "";
 let advMac = "";
 let advRssi = null;
-let advCount = 0;
-let advState = "";
-let advRaw = "";
 let watchedDevice = null;
 
 function errorMessage(e) {
@@ -689,28 +685,6 @@ function updateUi() {
   $("btn-scan").disabled = isBusy || isConnected;
   $("btn-connect").disabled = isBusy;
   $("btn-connect").textContent = isConnected ? "연결 해제" : "연결";
-  updateAdvInfo();
-}
-
-function updateAdvInfo() {
-  if (device === null) {
-    $("adv").textContent = "";
-    return;
-  }
-  let text = "광고: " + (advState || "-");
-  if (advCount > 0) {
-    text += " · " + advCount + "회";
-    text += " · 제조사 데이터 " + (advRaw || "없음");
-  }
-  $("adv").textContent = text;
-}
-
-function hex(dataView) {
-  const bytes = [];
-  for (let i = 0; i < dataView.byteLength; i++) {
-    bytes.push(dataView.getUint8(i).toString(16).padStart(2, "0").toUpperCase());
-  }
-  return bytes.join(" ");
 }
 
 function withTimeout(promise, ms, message) {
@@ -761,17 +735,7 @@ function parseMac(manufacturerData) {
 
 function onAdvertisement(e) {
   if (e.device !== device) return;
-  advCount++;
-  advState = "수신 중";
   if (typeof e.rssi === "number") advRssi = e.rssi;
-
-  const raw = [];
-  if (e.manufacturerData) {
-    e.manufacturerData.forEach((view, id) => {
-      raw.push("0x" + id.toString(16).padStart(4, "0").toUpperCase() + " [" + hex(view) + "]");
-    });
-  }
-  advRaw = raw.join(", ");
 
   const mac = parseMac(e.manufacturerData);
   if (mac) advMac = mac;
@@ -912,24 +876,14 @@ function stopLeScan() {
 }
 
 async function watchAdvertisements(target) {
-  if (target === watchedDevice) return;
-  if (typeof target.watchAdvertisements !== "function") {
-    advState = "브라우저 미지원";
-    updateAdvInfo();
-    return;
-  }
+  if (target === watchedDevice || typeof target.watchAdvertisements !== "function") return;
   try {
     target.addEventListener("advertisementreceived", onAdvertisement);
-    advState = "시작 중";
-    updateAdvInfo();
     await target.watchAdvertisements();
     watchedDevice = target;
-    if (advCount === 0) advState = "대기 중 (수신 없음)";
   } catch (e) {
     target.removeEventListener("advertisementreceived", onAdvertisement);
-    advState = "시작 실패 (" + (e.name || "") + " " + errorMessage(e) + ")";
   }
-  updateAdvInfo();
 }
 
 async function scan() {
@@ -965,9 +919,6 @@ async function connect(target, found) {
     target.addEventListener("gattserverdisconnected", onDisconnected);
     advMac = found ? found.mac : "";
     advRssi = found ? found.rssi : null;
-    advCount = 0;
-    advState = "";
-    advRaw = "";
   }
   device = target;
   watchAdvertisements(target);
