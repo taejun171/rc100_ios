@@ -509,6 +509,8 @@ const STICK_DEADZONE = 0.3;
 const STICK_TRAVEL = 0.6;
 const STICK_GRAB = 1.15;
 
+const VIBRATE_MS = 12;
+
 const $ = (id) => document.getElementById(id);
 const dirEls = Array.from(document.querySelectorAll(".dir"));
 
@@ -517,6 +519,13 @@ let level = 0;
 
 function btnData() {
   return holdBits | LEVEL_DATA[level];
+}
+
+function vibrate() {
+  if (typeof navigator.vibrate !== "function") return;
+  try {
+    navigator.vibrate(VIBRATE_MS);
+  } catch (e) {}
 }
 
 function makePacket(bits) {
@@ -561,6 +570,7 @@ function setLevelAt(x) {
   const next = Math.round(ratio * LEVEL_MAX);
   if (next !== level) {
     level = next;
+    vibrate();
     render();
   }
 }
@@ -585,6 +595,7 @@ let stickPointer = null;
 
 function setHold(bits) {
   if (bits !== holdBits) {
+    if (bits !== 0) vibrate();
     holdBits = bits;
     render();
   }
@@ -889,7 +900,7 @@ async function watchAdvertisements(target) {
 async function scan() {
   if (isBusy) return;
   if (!navigator.bluetooth) {
-    setStatus("Web Bluetooth 미지원 (iPhone 은 Bluefy 로 여세요)");
+    setStatus("Web Bluetooth 미지원 (iPhone 은 Bluefy, 안드로이드는 크롬으로 여세요)");
     return;
   }
   if (isLeScanSupported()) {
@@ -1046,7 +1057,7 @@ $("show-all").addEventListener("change", () => {
 });
 
 if (!navigator.bluetooth) {
-  $("hint").textContent = "이 브라우저는 Web Bluetooth 를 지원하지 않습니다. iPhone 은 Bluefy 앱으로 이 페이지를 여세요.";
+  $("hint").textContent = "이 브라우저는 Web Bluetooth 를 지원하지 않습니다. iPhone 은 Bluefy 앱, 안드로이드는 크롬으로 이 페이지를 여세요.";
 } else if (!window.isSecureContext) {
   $("hint").textContent = "Web Bluetooth 는 HTTPS 에서만 동작합니다.";
 }
