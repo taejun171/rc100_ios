@@ -802,7 +802,7 @@ function renderScanList() {
     item.append(mac, sub);
     item.addEventListener("click", () => {
       closeScanPanel();
-      connect(entry.device, entry);
+      connectFound(entry);
     });
     list.appendChild(item);
   }
@@ -908,6 +908,43 @@ async function scan() {
   } else {
     await scanWithPicker();
   }
+}
+
+// 검색 목록 (requestLEScan) 으로 찾은 장치는 연결 권한이 없어서 gatt.connect() 가
+// "Device was not authorized" 로 실패합니다 (iOS beacio 등). 목록에서 고르면 그 로봇만 보이도록
+// 필터를 좁힌 선택 창을 띄워 권한을 받습니다. requestDevice 는 탭 처리 안에서 바로 불러야 합니다.
+function requestFoundRobot(entry) {
+  const filter = entry.mac
+    ? { manufacturerData: [{
+        companyIdentifier: ROBOTIS_COMPANY_ID,
+        dataPrefix: new Uint8Array(entry.mac.split(":").map((h) => parseInt(h, 16)).concat(ROBOTIS_MFG_SUFFIX)),
+      }] }
+    : { namePrefix: entry.name };
+  return navigator.bluetooth.requestDevice({
+    filters: [filter],
+    optionalServices: [BLE_SERVICE_UUID],
+    optionalManufacturerData: [ROBOTIS_COMPANY_ID],
+  });
+}
+
+async function connectFound(entry) {
+  let picked;
+  try {
+    picked = await requestFoundRobot(entry);
+  } catch (e) {
+    if (e.name === "NotFoundError") {
+      setStatus("");
+      return;
+    }
+    if (e.name !== "TypeError") {
+      setStatus("검색 실패 (" + errorMessage(e) + ")");
+      return;
+    }
+    // dataPrefix 필터를 모르는 브라우저는 일반 선택 창으로
+    await scanWithPicker();
+    return;
+  }
+  await connect(picked, entry);
 }
 
 async function scanWithPicker() {
