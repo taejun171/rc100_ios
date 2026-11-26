@@ -111,6 +111,95 @@
     opacity: 0.4;
   }
 
+  .battery {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--sub);
+    white-space: nowrap;
+  }
+
+  .battery.known {
+    color: var(--text);
+  }
+
+  .batt-icon {
+    position: relative;
+    width: 28px;
+    height: 14px;
+    padding: 1.5px;
+    border: 1.5px solid currentColor;
+    border-radius: 3px;
+  }
+
+  .batt-icon::after {
+    content: "";
+    position: absolute;
+    right: -4.5px;
+    top: 3px;
+    width: 2px;
+    height: 5px;
+    border-radius: 0 1px 1px 0;
+    background: currentColor;
+  }
+
+  .batt-fill {
+    width: 0;
+    height: 100%;
+    border-radius: 1px;
+    background: var(--ok);
+  }
+
+  .battery.low .batt-fill {
+    background: #e44;
+  }
+
+  .actions {
+    flex: 1;
+    display: flex;
+    justify-content: center;
+    gap: 12px;
+    min-width: 0;
+  }
+
+  .action {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    width: 96px;
+    height: 56px;
+    border: 2px solid var(--idle);
+    border-radius: 12px;
+    background: #262626;
+    color: var(--text);
+    font-family: inherit;
+    touch-action: none;
+  }
+
+  .action.on {
+    border-color: var(--active);
+    background: rgba(0, 125, 255, 0.25);
+  }
+
+  .action:disabled {
+    opacity: 0.4;
+  }
+
+  .action-name {
+    font-size: 15px;
+    font-weight: 700;
+  }
+
+  .action-state {
+    font-size: 12px;
+    color: var(--sub);
+  }
+
   .level {
     display: flex;
     align-items: flex-start;
@@ -253,6 +342,7 @@
     flex-direction: column;
     align-items: flex-end;
     gap: 8px;
+    min-width: 0;
   }
 
   .packet {
@@ -400,6 +490,10 @@
       align-items: center;
     }
 
+    .actions {
+      flex: none;
+    }
+
     .hint {
       text-align: center;
     }
@@ -416,6 +510,10 @@
     <label class="show-all"><input id="show-all" type="checkbox"> 전체 장치</label>
     <button id="btn-scan">검색</button>
     <button id="btn-connect">연결</button>
+    <div id="battery" class="battery">
+      <div class="batt-icon"><div id="batt-fill" class="batt-fill"></div></div>
+      <span id="batt-text">--%</span>
+    </div>
   </header>
 
   <section class="level">
@@ -435,6 +533,17 @@
       <div class="dir right" data-key="8">R</div>
       <div class="dir down" data-key="2">D</div>
       <div id="knob" class="knob"></div>
+    </div>
+
+    <div class="actions">
+      <button id="btn-cargo" class="action">
+        <span class="action-name">카고</span>
+        <span id="cargo-state" class="action-state"></span>
+      </button>
+      <button id="btn-light" class="action">
+        <span class="action-name">헤드라이트</span>
+        <span id="light-state" class="action-state"></span>
+      </button>
     </div>
 
     <div class="side">
@@ -462,6 +571,25 @@
 
 const BLE_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 const BLE_WRITE_UUID   = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+const BLE_NOTIFY_UUID  = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+
+// ESP32 컨트롤 테이블 (esp_base_g5.0 dxl_ctable.h). 다이나믹셀 프로토콜 2.0 으로 읽고 씁니다.
+const DXL_ID = 201;
+const DXL_INST_READ = 0x02;
+const DXL_INST_WRITE = 0x03;
+const DXL_INST_STATUS = 0x55;
+const P_OPERATION_COMMAND = 9;
+const P_ROBOT_BATTERY_SOC = 47;
+const CTABLE_CMD_HEADLIGHT_OFF = 33;
+const CTABLE_CMD_HEADLIGHT_ON = 34;
+
+const SOC_READ_INTERVAL = 2000;
+const SOC_TIMEOUT_MS = 7000;
+const SOC_LOW = 20;
+
+// 카고는 RCU 의 remoteModuleControl() 이 500ms 마다 버튼 조합을 확인해 잠금 / 해제합니다.
+// 한 번은 반드시 걸리도록 그보다 길게 유지합니다.
+const CARGO_HOLD_MS = 700;
 
 const ROBOTIS_COMPANY_ID = 0x07cf;
 const ROBOTIS_MFG_SUFFIX = 0x05;
@@ -484,6 +612,10 @@ const RC100_KEY_2 = 32;
 const RC100_KEY_3 = 64;
 const RC100_KEY_4 = 128;
 const RC100_KEY_5 = 256;
+const RC100_KEY_6 = 512;
+
+const CARGO_OPEN_DATA  = RC100_KEY_5 | RC100_KEY_6 | RC100_KEY_U;
+const CARGO_CLOSE_DATA = RC100_KEY_5 | RC100_KEY_6 | RC100_KEY_D;
 
 const LEVEL_DATA = [
   0,
@@ -516,8 +648,14 @@ const dirEls = Array.from(document.querySelectorAll(".dir"));
 
 let holdBits = 0;
 let level = 0;
+let cargoBits = 0;
+let isCargoOpen = false;
+let isLightOn = false;
+let soc = null;
 
+// 카고 조합은 값이 정확히 일치해야 하므로, 보내는 동안에는 방향 / 단계를 빼고 조합만 보냅니다.
 function btnData() {
+  if (cargoBits !== 0) return cargoBits;
   return holdBits | LEVEL_DATA[level];
 }
 
@@ -537,7 +675,7 @@ function makePacket(bits) {
 function render() {
   const bits = btnData();
   for (const el of dirEls) {
-    el.classList.toggle("active", (bits & Number(el.dataset.key)) !== 0);
+    el.classList.toggle("active", (holdBits & Number(el.dataset.key)) !== 0);
   }
   $("packet").textContent = Array.from(makePacket(bits),
       (b) => b.toString(16).padStart(2, "0").toUpperCase()).join(" ");
@@ -677,6 +815,11 @@ let statusText = "";
 let advMac = "";
 let advRssi = null;
 let watchedDevice = null;
+let notifyChar = null;
+let cargoTimer = null;
+let socTime = 0;
+let dxlRx = [];
+const dxlQueue = [];
 
 function errorMessage(e) {
   return e && e.message ? e.message : String(e);
@@ -696,6 +839,118 @@ function updateUi() {
   $("btn-scan").disabled = isBusy || isConnected;
   $("btn-connect").disabled = isBusy;
   $("btn-connect").textContent = isConnected ? "연결 해제" : "연결";
+
+  $("btn-cargo").disabled = !isConnected || cargoBits !== 0;
+  $("btn-cargo").classList.toggle("on", isCargoOpen);
+  $("cargo-state").textContent = isCargoOpen ? "열림" : "닫힘";
+  $("btn-light").disabled = !isConnected;
+  $("btn-light").classList.toggle("on", isLightOn);
+  $("light-state").textContent = isLightOn ? "켜짐" : "꺼짐";
+
+  $("battery").classList.toggle("known", soc !== null);
+  $("battery").classList.toggle("low", soc !== null && soc <= SOC_LOW);
+  $("batt-fill").style.width = (soc === null ? 0 : Math.min(soc, 100)) + "%";
+  $("batt-text").textContent = (soc === null ? "--" : soc) + "%";
+}
+
+// 연결이 바뀌면 로봇의 실제 상태를 알 수 없으므로 닫힘 / 꺼짐 / 모름으로 되돌립니다.
+function resetRobotState() {
+  clearTimeout(cargoTimer);
+  cargoBits = 0;
+  isCargoOpen = false;
+  isLightOn = false;
+  soc = null;
+  socTime = 0;
+  dxlQueue.length = 0;
+  dxlRx = [];
+}
+
+function dxlCrc(bytes) {
+  let crc = 0;
+  for (const b of bytes) {
+    crc ^= b << 8;
+    for (let i = 0; i < 8; i++) {
+      crc = (crc & 0x8000) ? ((crc << 1) ^ 0x8005) : (crc << 1);
+    }
+    crc &= 0xffff;
+  }
+  return crc;
+}
+
+function makeDxlPacket(inst, params) {
+  const length = params.length + 3;
+  const body = [0xff, 0xff, 0xfd, 0x00, DXL_ID, length & 0xff, length >> 8, inst, ...params];
+  const crc = dxlCrc(body);
+  return new Uint8Array([...body, crc & 0xff, crc >> 8]);
+}
+
+function dxlWrite(addr, value) {
+  dxlQueue.push(makeDxlPacket(DXL_INST_WRITE, [addr & 0xff, addr >> 8, value]));
+}
+
+function dxlRead(addr, length) {
+  dxlQueue.push(makeDxlPacket(DXL_INST_READ, [addr & 0xff, addr >> 8, length & 0xff, length >> 8]));
+}
+
+// Notify 로 들어온 바이트에서 Status 패킷을 찾습니다. 읽기 요청은 SOC 하나뿐이므로
+// 데이터가 1바이트인 정상 응답을 SOC 로 봅니다.
+function onNotify(e) {
+  const view = e.target.value;
+  for (let i = 0; i < view.byteLength; i++) dxlRx.push(view.getUint8(i));
+
+  while (dxlRx.length >= 11) {
+    if (dxlRx[0] !== 0xff || dxlRx[1] !== 0xff || dxlRx[2] !== 0xfd || dxlRx[3] !== 0x00) {
+      dxlRx.shift();
+      continue;
+    }
+    const length = dxlRx[5] | (dxlRx[6] << 8);
+    const total = length + 7;
+    if (length < 4 || total > 64) {
+      dxlRx.shift();
+      continue;
+    }
+    if (dxlRx.length < total) break;
+
+    const packet = dxlRx.slice(0, total);
+    const crc = packet[total - 2] | (packet[total - 1] << 8);
+    if (dxlCrc(packet.slice(0, total - 2)) !== crc) {
+      dxlRx.shift();
+      continue;
+    }
+    dxlRx = dxlRx.slice(total);
+
+    if (packet[7] === DXL_INST_STATUS && packet[8] === 0 && length === 5) {
+      soc = packet[9];
+      socTime = Date.now();
+      updateUi();
+    }
+  }
+  if (dxlRx.length > 256) dxlRx = [];
+}
+
+function onCargoPress() {
+  if (!isConnected || cargoBits !== 0) return;
+  // 주행 중에는 보내지 않습니다. 버튼 6 이 눌리면 RCU 가 직전 속도를 그대로 유지합니다.
+  if (holdBits !== 0) return;
+
+  isCargoOpen = !isCargoOpen;
+  cargoBits = isCargoOpen ? CARGO_OPEN_DATA : CARGO_CLOSE_DATA;
+  vibrate();
+  render();
+  updateUi();
+  cargoTimer = setTimeout(() => {
+    cargoBits = 0;
+    render();
+    updateUi();
+  }, CARGO_HOLD_MS);
+}
+
+function onLightPress() {
+  if (!isConnected) return;
+  isLightOn = !isLightOn;
+  dxlWrite(P_OPERATION_COMMAND, isLightOn ? CTABLE_CMD_HEADLIGHT_ON : CTABLE_CMD_HEADLIGHT_OFF);
+  vibrate();
+  updateUi();
 }
 
 function withTimeout(promise, ms, message) {
@@ -987,6 +1242,16 @@ async function connect(target, found) {
       }
       throw new Error("GAEMI BLE 장치가 아닙니다");
     }
+    // Notify 는 배터리 표시에만 쓰므로, 없어도 조종은 그대로 됩니다.
+    try {
+      notifyChar = await service.getCharacteristic(BLE_NOTIFY_UUID);
+      notifyChar.addEventListener("characteristicvaluechanged", onNotify);
+      await notifyChar.startNotifications();
+    } catch (e) {
+      notifyChar = null;
+      console.log("BLE Notify 사용 불가: " + errorMessage(e));
+    }
+    resetRobotState();
     isTxBusy = false;
     isConnected = true;
     statusText = "연결됨";
@@ -1004,15 +1269,21 @@ async function connect(target, found) {
 function onDisconnected() {
   if (isClosing || !isConnected) return;
   writeChar = null;
+  notifyChar = null;
   isConnected = false;
   isTxBusy = false;
+  resetRobotState();
+  render();
   setStatus("연결 끊김");
 }
 
 async function closeDevice() {
   writeChar = null;
+  notifyChar = null;
   isConnected = false;
   isTxBusy = false;
+  resetRobotState();
+  render();
   if (device && device.gatt.connected) {
     isClosing = true;
     try {
@@ -1057,12 +1328,24 @@ setInterval(() => {
   const bits = btnData();
   if (isConnected) {
     const now = Date.now();
-    if (bits !== preBtnData || now - preSendTime >= BLE_SEND_INTERVAL) {
+    if (dxlQueue.length > 0) {
+      // 컨트롤 테이블 패킷은 한 번만 보내면 되므로 RC-100 패킷보다 먼저 보냅니다.
+      if (send(dxlQueue[0])) dxlQueue.shift();
+    } else if (bits !== preBtnData || now - preSendTime >= BLE_SEND_INTERVAL) {
       if (send(makePacket(bits))) preSendTime = now;
     }
   }
   preBtnData = bits;
 }, LOOP_INTERVAL);
+
+setInterval(() => {
+  if (!isConnected || notifyChar === null) return;
+  if (dxlQueue.length === 0) dxlRead(P_ROBOT_BATTERY_SOC, 1);
+  if (soc !== null && Date.now() - socTime > SOC_TIMEOUT_MS) {
+    soc = null;
+    updateUi();
+  }
+}, SOC_READ_INTERVAL);
 
 let wakeLock = null;
 
@@ -1079,6 +1362,15 @@ async function requestWakeLock() {
 $("btn-scan").addEventListener("click", scan);
 $("btn-connect").addEventListener("click", onConnectPress);
 $("btn-scan-close").addEventListener("click", closeScanPanel);
+
+// #pad 가 touchstart 를 막아 click 이 생기지 않으므로 pointerdown 으로 받습니다.
+for (const [id, handler] of [["btn-cargo", onCargoPress], ["btn-light", onLightPress]]) {
+  $(id).addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    handler();
+  });
+}
 $("btn-picker").addEventListener("click", () => {
   closeScanPanel();
   scanWithPicker();
