@@ -555,7 +555,6 @@
 
     <div class="side">
       <div id="packet" class="packet"></div>
-      <div id="dxl-stat" class="packet"></div>
       <div id="hint" class="hint"></div>
     </div>
   </main>
@@ -615,14 +614,16 @@ const LE_SCAN_TIMEOUT_MS = 10000;
 
 const LOOP_INTERVAL = 10;
 
-// 화면의 진단 줄에 표시합니다. 휴대폰이 이전 페이지를 캐시해서 쓰고 있는지 확인하는 용도입니다.
-const APP_VERSION = "v7";
-
 // BLE 쓰기는 종류와 상관없이 10Hz 로 고정합니다. 컨트롤 테이블 패킷도 이 주기 안에서 RC-100 패킷
 // 대신 나갑니다. beacio 처럼 BLE 요청 횟수를 제한하는 브라우저는 요청이 많으면
 // "Rate Limit exceeded" 로 거부합니다. 전송이 실패하면 잠시 쉬었다가 보냅니다.
 const BLE_SEND_INTERVAL = 100;
 const TX_BACKOFF_MS = 300;
+
+// RC-100 패킷은 조이스틱을 누르고 있는 동안 (과 카고 조합을 보내는 동안) 에만 보냅니다.
+// ESP32 는 마지막으로 받은 값을 계속 유지하므로, 손을 떼면 방향이 빠진 패킷을 이만큼 더 보내서
+// 로봇을 멈춥니다. 응답 없는 쓰기는 유실될 수 있어서 한 번이 아니라 여러 번 보냅니다.
+const RC_STOP_COUNT = 3;
 
 const RC100_KEY_U = 1;
 const RC100_KEY_D = 2;
@@ -845,16 +846,6 @@ let dxlRx = [];
 let txPauseUntil = 0;
 const dxlQueue = [];
 
-// 진단용: 다이나믹셀 패킷을 종류별로 몇 번 보냈고 (성공 / 시도) 응답을 몇 번 받았는지 화면에 표시합니다.
-const dxlStat = { writeOk: 0, writeTry: 0, readOk: 0, readTry: 0, status: 0, error: "" };
-
-function renderDxlStat() {
-  $("dxl-stat").textContent = APP_VERSION + "  W " + dxlStat.writeOk + "/" + dxlStat.writeTry
-      + "  R " + dxlStat.readOk + "/" + dxlStat.readTry
-      + "  S " + dxlStat.status
-      + (dxlStat.error ? "  " + dxlStat.error : "");
-}
-
 function errorMessage(e) {
   return e && e.message ? e.message : String(e);
 }
@@ -894,6 +885,7 @@ function resetRobotState() {
   isCargoOpen = false;
   isLightOn = false;
   lightSendLeft = 0;
+  rcStopLeft = 0;
   soc = null;
   socTime = 0;
   dxlQueue.length = 0;
@@ -953,8 +945,6 @@ function onNotify(e) {
       continue;
     }
     dxlRx = dxlRx.slice(total);
-    dxlStat.status++;
-    renderDxlStat();
 
     if (packet[7] === DXL_INST_STATUS && packet[8] === 0 && length === 5) {
       soc = packet[9];
@@ -1364,37 +1354,22 @@ function send(packet) {
   }
   return write
     .then(() => true, (e) => {
-      const message = errorMessage(e);
-      console.log("BLE 전송 실패: " + message);
-      dxlStat.error = message;
+      console.log("BLE 전송 실패: " + errorMessage(e));
       txPauseUntil = Date.now() + TX_BACKOFF_MS;
-      renderDxlStat();
       return false;
     })
     .finally(() => { isTxBusy = false; });
 }
 
+// 컨트롤 테이블 패킷은 한 번만 보냅니다. 실패해도 다시 보내지 않습니다.
 function sendDxl() {
-  const packet = dxlQueue[0];
-  const result = send(packet);
-  if (result === null) return false;
-
-  const isWrite = packet[7] === DXL_INST_WRITE;
-  if (isWrite) dxlStat.writeTry++; else dxlStat.readTry++;
-  renderDxlStat();
-
-  result.then((ok) => {
-    if (ok) {
-      if (isWrite) dxlStat.writeOk++; else dxlStat.readOk++;
-    }
-    renderDxlStat();
-  });
-  // 실패해도 다시 보내지 않습니다.
+  if (send(dxlQueue[0]) === null) return false;
   dxlQueue.shift();
   return true;
 }
 
 let preSendTime = 0;
+let rcStopLeft = 0;
 
 setInterval(() => {
   const bits = btnData();
@@ -1407,9 +1382,20 @@ setInterval(() => {
       lightSendLeft--;
       lightSendTime = now;
     }
-    // 100ms 마다 패킷 하나만 보냅니다. 컨트롤 테이블 패킷이 있으면 그 차례에는 RC-100 대신 보냅니다.
+    const isRcActive = stickPointer !== null || cargoBits !== 0;
+    if (isRcActive) rcStopLeft = RC_STOP_COUNT;
+
+    // 100ms 마다 패킷 하나만 보냅니다. 정지 패킷이 가장 먼저이고, 그다음이 컨트롤 테이블 패킷입니다.
     if (now - preSendTime >= BLE_SEND_INTERVAL) {
-      const sent = dxlQueue.length > 0 ? sendDxl() : send(makePacket(bits)) !== null;
+      let sent = false;
+      if (!isRcActive && rcStopLeft > 0) {
+        sent = send(makePacket(bits)) !== null;
+        if (sent) rcStopLeft--;
+      } else if (dxlQueue.length > 0) {
+        sent = sendDxl();
+      } else if (isRcActive) {
+        sent = send(makePacket(bits)) !== null;
+      }
       if (sent) preSendTime = now;
     }
   }
@@ -1470,7 +1456,6 @@ if (!navigator.bluetooth) {
 
 updateUi();
 render();
-renderDxlStat();
 </script>
 </body>
 </html>
