@@ -591,7 +591,7 @@ const P_ROBOT_BATTERY_SOC = 47;
 const CTABLE_CMD_HEADLIGHT_OFF = 33;
 const CTABLE_CMD_HEADLIGHT_ON = 34;
 
-const DXL_RETRY_MAX = 3;
+const DXL_RETRY_MAX = 5;
 
 const SOC_READ_INTERVAL = 2000;
 
@@ -617,7 +617,10 @@ const LE_SCAN_TIMEOUT_MS = 10000;
 
 const LOOP_INTERVAL = 10;
 
-const BLE_SEND_INTERVAL = 30;
+// RC-100 패킷은 10Hz 로 고정해서 보냅니다. beacio 처럼 BLE 요청 횟수를 제한하는 브라우저는
+// 요청이 많으면 "Rate Limit exceeded" 로 거부합니다. 전송이 실패하면 잠시 쉬었다가 보냅니다.
+const BLE_SEND_INTERVAL = 100;
+const TX_BACKOFF_MS = 300;
 
 const RC100_KEY_U = 1;
 const RC100_KEY_D = 2;
@@ -838,6 +841,7 @@ let cargoTimer = null;
 let socTime = 0;
 let dxlRx = [];
 let dxlRetry = 0;
+let txPauseUntil = 0;
 const dxlQueue = [];
 
 // 진단용: 다이나믹셀 패킷을 종류별로 몇 번 보냈고 (성공 / 시도) 응답을 몇 번 받았는지 화면에 표시합니다.
@@ -1287,6 +1291,7 @@ async function connect(target, found) {
     }
     resetRobotState();
     isTxBusy = false;
+    txPauseUntil = 0;
     isConnected = true;
     statusText = "연결됨";
     requestWakeLock();
@@ -1365,8 +1370,11 @@ function send(packet, withResponse) {
   }
   return write
     .then(() => true, (e) => {
-      console.log("BLE 전송 실패: " + errorMessage(e));
-      if (withResponse) dxlStat.error = errorMessage(e);
+      const message = errorMessage(e);
+      console.log("BLE 전송 실패: " + message);
+      dxlStat.error = message;
+      txPauseUntil = Date.now() + TX_BACKOFF_MS;
+      renderDxlStat();
       return false;
     })
     .finally(() => { isTxBusy = false; });
@@ -1394,13 +1402,13 @@ function sendDxl() {
   });
 }
 
-let preBtnData = -1;
 let preSendTime = 0;
 
 setInterval(() => {
   const bits = btnData();
-  if (isConnected) {
-    const now = Date.now();
+  const now = Date.now();
+  // 전송 실패 뒤에는 잠시 아무것도 보내지 않습니다. 쉬고 나면 대기 중인 컨트롤 테이블 패킷이 먼저 나갑니다.
+  if (isConnected && now >= txPauseUntil) {
     // 반복 도중에 버튼을 다시 누르면 남은 횟수는 새 상태로 보냅니다.
     if (lightSendLeft > 0 && now - lightSendTime >= LIGHT_SEND_INTERVAL) {
       dxlWrite(P_OPERATION_COMMAND, isLightOn ? CTABLE_CMD_HEADLIGHT_ON : CTABLE_CMD_HEADLIGHT_OFF);
@@ -1410,11 +1418,10 @@ setInterval(() => {
     if (dxlQueue.length > 0) {
       // 컨트롤 테이블 패킷은 RC-100 패킷보다 먼저 보내고, 실패하면 다시 보냅니다.
       sendDxl();
-    } else if (bits !== preBtnData || now - preSendTime >= BLE_SEND_INTERVAL) {
-      if (send(makePacket(bits))) preSendTime = now;
+    } else if (now - preSendTime >= BLE_SEND_INTERVAL) {
+      if (send(makePacket(bits)) !== null) preSendTime = now;
     }
   }
-  preBtnData = bits;
 }, LOOP_INTERVAL);
 
 setInterval(() => {
