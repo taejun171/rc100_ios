@@ -591,13 +591,11 @@ const P_ROBOT_BATTERY_SOC = 47;
 const CTABLE_CMD_HEADLIGHT_OFF = 33;
 const CTABLE_CMD_HEADLIGHT_ON = 34;
 
-const DXL_RETRY_MAX = 5;
-
 const SOC_READ_INTERVAL = 2000;
 
 // 헤드라이트 명령은 로봇이 받았는지 확인할 방법이 없어서, 같은 명령을 이 간격으로 여러 번 보냅니다.
 // 켜기 / 끄기는 여러 번 받아도 결과가 같습니다.
-const LIGHT_SEND_COUNT = 3;
+const LIGHT_SEND_COUNT = 1;
 const LIGHT_SEND_INTERVAL = 150;
 
 const SOC_TIMEOUT_MS = 7000;
@@ -617,8 +615,12 @@ const LE_SCAN_TIMEOUT_MS = 10000;
 
 const LOOP_INTERVAL = 10;
 
-// RC-100 패킷은 10Hz 로 고정해서 보냅니다. beacio 처럼 BLE 요청 횟수를 제한하는 브라우저는
-// 요청이 많으면 "Rate Limit exceeded" 로 거부합니다. 전송이 실패하면 잠시 쉬었다가 보냅니다.
+// 화면의 진단 줄에 표시합니다. 휴대폰이 이전 페이지를 캐시해서 쓰고 있는지 확인하는 용도입니다.
+const APP_VERSION = "v7";
+
+// BLE 쓰기는 종류와 상관없이 10Hz 로 고정합니다. 컨트롤 테이블 패킷도 이 주기 안에서 RC-100 패킷
+// 대신 나갑니다. beacio 처럼 BLE 요청 횟수를 제한하는 브라우저는 요청이 많으면
+// "Rate Limit exceeded" 로 거부합니다. 전송이 실패하면 잠시 쉬었다가 보냅니다.
 const BLE_SEND_INTERVAL = 100;
 const TX_BACKOFF_MS = 300;
 
@@ -840,7 +842,6 @@ let notifyChar = null;
 let cargoTimer = null;
 let socTime = 0;
 let dxlRx = [];
-let dxlRetry = 0;
 let txPauseUntil = 0;
 const dxlQueue = [];
 
@@ -848,7 +849,7 @@ const dxlQueue = [];
 const dxlStat = { writeOk: 0, writeTry: 0, readOk: 0, readTry: 0, status: 0, error: "" };
 
 function renderDxlStat() {
-  $("dxl-stat").textContent = "W " + dxlStat.writeOk + "/" + dxlStat.writeTry
+  $("dxl-stat").textContent = APP_VERSION + "  W " + dxlStat.writeOk + "/" + dxlStat.writeTry
       + "  R " + dxlStat.readOk + "/" + dxlStat.readTry
       + "  S " + dxlStat.status
       + (dxlStat.error ? "  " + dxlStat.error : "");
@@ -896,7 +897,6 @@ function resetRobotState() {
   soc = null;
   socTime = 0;
   dxlQueue.length = 0;
-  dxlRetry = 0;
   dxlRx = [];
 }
 
@@ -1348,23 +1348,17 @@ async function onConnectPress() {
 }
 
 // 보내기 시작했으면 전송 결과 (true / false) 를 주는 Promise 를, 보낼 수 없으면 null 을 돌려줍니다.
-// 응답 없는 쓰기는 휴대폰의 송신 버퍼가 차면 조용히 버려집니다. 계속 다시 보내는 RC-100 패킷은
-// 괜찮지만, 한 번만 보내는 컨트롤 테이블 패킷은 withResponse 로 ESP32 가 받은 것을 확인합니다.
-function send(packet, withResponse) {
+// 모든 패킷을 응답 없는 쓰기로 보내므로, 결과는 브라우저가 요청을 받아줬는지만 뜻합니다.
+// ESP32 의 응답을 기다리지 않습니다.
+function send(packet) {
   if (writeChar === null || isTxBusy) return null;
 
   isTxBusy = true;
   let write;
   try {
-    if (withResponse) {
-      write = writeChar.writeValueWithResponse
-        ? writeChar.writeValueWithResponse(packet)
-        : writeChar.writeValue(packet);
-    } else {
-      write = writeChar.writeValueWithoutResponse
-        ? writeChar.writeValueWithoutResponse(packet)
-        : writeChar.writeValue(packet);
-    }
+    write = writeChar.writeValueWithoutResponse
+      ? writeChar.writeValueWithoutResponse(packet)
+      : writeChar.writeValue(packet);
   } catch (e) {
     write = Promise.reject(e);
   }
@@ -1382,8 +1376,8 @@ function send(packet, withResponse) {
 
 function sendDxl() {
   const packet = dxlQueue[0];
-  const result = send(packet, true);
-  if (result === null) return;
+  const result = send(packet);
+  if (result === null) return false;
 
   const isWrite = packet[7] === DXL_INST_WRITE;
   if (isWrite) dxlStat.writeTry++; else dxlStat.readTry++;
@@ -1394,12 +1388,10 @@ function sendDxl() {
       if (isWrite) dxlStat.writeOk++; else dxlStat.readOk++;
     }
     renderDxlStat();
-    if (dxlQueue[0] !== packet) return;
-    if (ok || ++dxlRetry >= DXL_RETRY_MAX) {
-      dxlQueue.shift();
-      dxlRetry = 0;
-    }
   });
+  // 실패해도 다시 보내지 않습니다.
+  dxlQueue.shift();
+  return true;
 }
 
 let preSendTime = 0;
@@ -1415,11 +1407,10 @@ setInterval(() => {
       lightSendLeft--;
       lightSendTime = now;
     }
-    if (dxlQueue.length > 0) {
-      // 컨트롤 테이블 패킷은 RC-100 패킷보다 먼저 보내고, 실패하면 다시 보냅니다.
-      sendDxl();
-    } else if (now - preSendTime >= BLE_SEND_INTERVAL) {
-      if (send(makePacket(bits)) !== null) preSendTime = now;
+    // 100ms 마다 패킷 하나만 보냅니다. 컨트롤 테이블 패킷이 있으면 그 차례에는 RC-100 대신 보냅니다.
+    if (now - preSendTime >= BLE_SEND_INTERVAL) {
+      const sent = dxlQueue.length > 0 ? sendDxl() : send(makePacket(bits)) !== null;
+      if (sent) preSendTime = now;
     }
   }
 }, LOOP_INTERVAL);
@@ -1479,6 +1470,7 @@ if (!navigator.bluetooth) {
 
 updateUi();
 render();
+renderDxlStat();
 </script>
 </body>
 </html>
