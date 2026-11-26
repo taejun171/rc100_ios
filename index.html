@@ -114,8 +114,11 @@
   .battery {
     display: flex;
     align-items: center;
+    justify-content: flex-end;
     gap: 6px;
-    margin-left: auto;
+    flex: none;
+    order: 1;
+    width: 80px;
     font-size: 14px;
     font-weight: 600;
     color: var(--sub);
@@ -472,7 +475,11 @@
     }
 
     .info {
-      flex-basis: 100%;
+      flex-basis: calc(100% - 90px);
+    }
+
+    .battery {
+      order: 0;
     }
 
     .level {
@@ -506,14 +513,14 @@
       <div class="title">RC-100 · ESP32 BLE</div>
       <div id="status" class="status">장치 없음</div>
     </div>
-    <span id="dot" class="dot"></span>
-    <label class="show-all"><input id="show-all" type="checkbox"> 전체 장치</label>
-    <button id="btn-scan">검색</button>
-    <button id="btn-connect">연결</button>
     <div id="battery" class="battery">
       <div class="batt-icon"><div id="batt-fill" class="batt-fill"></div></div>
       <span id="batt-text">--%</span>
     </div>
+    <span id="dot" class="dot"></span>
+    <label class="show-all"><input id="show-all" type="checkbox"> 전체 장치</label>
+    <button id="btn-scan">검색</button>
+    <button id="btn-connect">연결</button>
   </header>
 
   <section class="level">
@@ -580,12 +587,22 @@ const DXL_INST_WRITE = 0x03;
 const DXL_INST_STATUS = 0x55;
 const P_OPERATION_COMMAND = 9;
 const P_ROBOT_BATTERY_SOC = 47;
+const P_HEADLIGHT_STATE = 48;
+const HEADLIGHT_STATE_OFF = 1;
+const HEADLIGHT_STATE_ON = 2;
 const CTABLE_CMD_HEADLIGHT_OFF = 33;
 const CTABLE_CMD_HEADLIGHT_ON = 34;
 
 const DXL_RETRY_MAX = 3;
 
-const SOC_READ_INTERVAL = 2000;
+const STATE_READ_INTERVAL = 1000;
+const STATE_TICK = 200;
+
+// 헤드라이트 명령을 보낸 뒤 로봇의 상태가 바뀌지 않으면 이 간격으로 다시 보냅니다.
+const LIGHT_RETRY_MS = 600;
+const LIGHT_RETRY_MAX = 3;
+const LIGHT_GIVE_UP_MS = 3000;
+
 const SOC_TIMEOUT_MS = 7000;
 const SOC_LOW = 20;
 
@@ -653,6 +670,9 @@ let level = 0;
 let cargoBits = 0;
 let isCargoOpen = false;
 let isLightOn = false;
+let lightGoal = null;
+let lightSendTime = 0;
+let lightTries = 0;
 let soc = null;
 
 // 카고 조합은 값이 정확히 일치해야 하므로, 보내는 동안에는 방향 / 단계를 빼고 조합만 보냅니다.
@@ -820,6 +840,7 @@ let watchedDevice = null;
 let notifyChar = null;
 let cargoTimer = null;
 let socTime = 0;
+let stateReadTime = 0;
 let dxlRx = [];
 let dxlRetry = 0;
 const dxlQueue = [];
@@ -847,8 +868,9 @@ function updateUi() {
   $("btn-cargo").classList.toggle("on", isCargoOpen);
   $("cargo-state").textContent = isCargoOpen ? "열림" : "닫힘";
   $("btn-light").disabled = !isConnected;
-  $("btn-light").classList.toggle("on", isLightOn);
-  $("light-state").textContent = isLightOn ? "켜짐" : "꺼짐";
+  const lightOn = lightGoal !== null ? lightGoal : isLightOn;
+  $("btn-light").classList.toggle("on", lightOn);
+  $("light-state").textContent = lightOn ? "켜짐" : "꺼짐";
 
   $("battery").classList.toggle("known", soc !== null);
   $("battery").classList.toggle("low", soc !== null && soc <= SOC_LOW);
@@ -862,8 +884,10 @@ function resetRobotState() {
   cargoBits = 0;
   isCargoOpen = false;
   isLightOn = false;
+  lightGoal = null;
   soc = null;
   socTime = 0;
+  stateReadTime = 0;
   dxlQueue.length = 0;
   dxlRetry = 0;
   dxlRx = [];
@@ -896,8 +920,8 @@ function dxlRead(addr, length) {
   dxlQueue.push(makeDxlPacket(DXL_INST_READ, [addr & 0xff, addr >> 8, length & 0xff, length >> 8]));
 }
 
-// Notify 로 들어온 바이트에서 Status 패킷을 찾습니다. 읽기 요청은 SOC 하나뿐이므로
-// 데이터가 1바이트인 정상 응답을 SOC 로 봅니다.
+// Notify 로 들어온 바이트에서 Status 패킷을 찾습니다. 읽기 요청은 47 ~ 48번 (SOC, 헤드라이트 상태)
+// 하나뿐이므로 데이터가 2바이트인 정상 응답을 그 값으로 봅니다.
 function onNotify(e) {
   const view = e.target.value;
   for (let i = 0; i < view.byteLength; i++) dxlRx.push(view.getUint8(i));
@@ -923,9 +947,10 @@ function onNotify(e) {
     }
     dxlRx = dxlRx.slice(total);
 
-    if (packet[7] === DXL_INST_STATUS && packet[8] === 0 && length === 5) {
+    if (packet[7] === DXL_INST_STATUS && packet[8] === 0 && length === 6) {
       soc = packet[9];
       socTime = Date.now();
+      onLightState(packet[10]);
       updateUi();
     }
   }
@@ -949,12 +974,43 @@ function onCargoPress() {
   }, CARGO_HOLD_MS);
 }
 
+function sendLightGoal() {
+  dxlWrite(P_OPERATION_COMMAND, lightGoal ? CTABLE_CMD_HEADLIGHT_ON : CTABLE_CMD_HEADLIGHT_OFF);
+  lightSendTime = Date.now();
+  lightTries++;
+}
+
 function onLightPress() {
   if (!isConnected) return;
-  isLightOn = !isLightOn;
-  dxlWrite(P_OPERATION_COMMAND, isLightOn ? CTABLE_CMD_HEADLIGHT_ON : CTABLE_CMD_HEADLIGHT_OFF);
+  lightGoal = !(lightGoal !== null ? lightGoal : isLightOn);
+  lightTries = 0;
+  sendLightGoal();
   vibrate();
   updateUi();
+}
+
+// 로봇이 알려준 실제 상태입니다. 상태를 알려주지 않는 펌웨어 (0) 에서는 누른 대로 표시만 합니다.
+function onLightState(state) {
+  if (state !== HEADLIGHT_STATE_OFF && state !== HEADLIGHT_STATE_ON) {
+    if (lightGoal !== null) {
+      isLightOn = lightGoal;
+      lightGoal = null;
+    }
+    return;
+  }
+
+  isLightOn = state === HEADLIGHT_STATE_ON;
+  if (lightGoal === null) return;
+  if (lightGoal === isLightOn) {
+    lightGoal = null;
+  } else if (Date.now() - lightSendTime >= LIGHT_RETRY_MS) {
+    // 명령이 반영되지 않았으면 다시 보내고, 그래도 안 되면 실제 상태를 표시합니다.
+    if (lightTries < LIGHT_RETRY_MAX) {
+      sendLightGoal();
+    } else {
+      lightGoal = null;
+    }
+  }
 }
 
 function withTimeout(promise, ms, message) {
@@ -1372,14 +1428,28 @@ setInterval(() => {
   preBtnData = bits;
 }, LOOP_INTERVAL);
 
+// 47 ~ 48번 (SOC, 헤드라이트 상태) 을 한 번에 읽습니다. 헤드라이트 명령을 보낸 뒤에는
+// 결과를 빨리 확인하려고 더 자주 읽습니다.
 setInterval(() => {
   if (!isConnected || notifyChar === null) return;
-  if (dxlQueue.length === 0) dxlRead(P_ROBOT_BATTERY_SOC, 1);
-  if (soc !== null && Date.now() - socTime > SOC_TIMEOUT_MS) {
+
+  const now = Date.now();
+  const interval = lightGoal !== null ? STATE_TICK : STATE_READ_INTERVAL;
+  if (dxlQueue.length === 0 && now - stateReadTime >= interval) {
+    dxlRead(P_ROBOT_BATTERY_SOC, P_HEADLIGHT_STATE - P_ROBOT_BATTERY_SOC + 1);
+    stateReadTime = now;
+  }
+  // 상태 응답이 오지 않는 펌웨어에서는 확인을 그만두고 누른 대로 표시합니다.
+  if (lightGoal !== null && now - lightSendTime > LIGHT_GIVE_UP_MS) {
+    isLightOn = lightGoal;
+    lightGoal = null;
+    updateUi();
+  }
+  if (soc !== null && now - socTime > SOC_TIMEOUT_MS) {
     soc = null;
     updateUi();
   }
-}, SOC_READ_INTERVAL);
+}, STATE_TICK);
 
 let wakeLock = null;
 
