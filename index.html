@@ -555,6 +555,7 @@
 
     <div class="side">
       <div id="packet" class="packet"></div>
+      <div id="dxl-stat" class="packet"></div>
       <div id="hint" class="hint"></div>
     </div>
   </main>
@@ -839,6 +840,16 @@ let dxlRx = [];
 let dxlRetry = 0;
 const dxlQueue = [];
 
+// 진단용: 다이나믹셀 패킷을 종류별로 몇 번 보냈고 (성공 / 시도) 응답을 몇 번 받았는지 화면에 표시합니다.
+const dxlStat = { writeOk: 0, writeTry: 0, readOk: 0, readTry: 0, status: 0, error: "" };
+
+function renderDxlStat() {
+  $("dxl-stat").textContent = "W " + dxlStat.writeOk + "/" + dxlStat.writeTry
+      + "  R " + dxlStat.readOk + "/" + dxlStat.readTry
+      + "  S " + dxlStat.status
+      + (dxlStat.error ? "  " + dxlStat.error : "");
+}
+
 function errorMessage(e) {
   return e && e.message ? e.message : String(e);
 }
@@ -938,6 +949,8 @@ function onNotify(e) {
       continue;
     }
     dxlRx = dxlRx.slice(total);
+    dxlStat.status++;
+    renderDxlStat();
 
     if (packet[7] === DXL_INST_STATUS && packet[8] === 0 && length === 5) {
       soc = packet[9];
@@ -1353,6 +1366,7 @@ function send(packet, withResponse) {
   return write
     .then(() => true, (e) => {
       console.log("BLE 전송 실패: " + errorMessage(e));
+      if (withResponse) dxlStat.error = errorMessage(e);
       return false;
     })
     .finally(() => { isTxBusy = false; });
@@ -1363,7 +1377,15 @@ function sendDxl() {
   const result = send(packet, true);
   if (result === null) return;
 
+  const isWrite = packet[7] === DXL_INST_WRITE;
+  if (isWrite) dxlStat.writeTry++; else dxlStat.readTry++;
+  renderDxlStat();
+
   result.then((ok) => {
+    if (ok) {
+      if (isWrite) dxlStat.writeOk++; else dxlStat.readOk++;
+    }
+    renderDxlStat();
     if (dxlQueue[0] !== packet) return;
     if (ok || ++dxlRetry >= DXL_RETRY_MAX) {
       dxlQueue.shift();
